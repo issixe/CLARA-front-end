@@ -1,7 +1,7 @@
 "use client";
 
 import type { FC } from "react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { format } from "date-fns";
 import { Calendar } from "@/components/ui/calendar";
@@ -23,6 +23,9 @@ import {
   Settings,
   LogOut,
   CalendarIcon,
+  Moon,
+  Footprints,
+  Heart,
 } from "lucide-react";
 
 const symptomData = {
@@ -568,6 +571,100 @@ const symptomData = {
   ],
 };
 
+// Interface for ring data from API
+interface RingData {
+  date: string;
+  sleep: {
+    current: number;
+    goal: number;
+    percentage: number;
+  };
+  steps: {
+    current: number;
+    goal: number;
+    percentage: number;
+  };
+  energy?: {
+    current: number;
+    goal: number;
+    percentage: number;
+  };
+}
+
+// Interface for heart rate data from API
+interface HeartRateData {
+  date: string;
+  data_points: Array<{
+    time: string;
+    timestamp: number;
+    value: number;
+  }>;
+  summary: {
+    average: number;
+    min: number;
+    max: number;
+    count: number;
+  };
+  graph: string; // base64 encoded PNG
+}
+
+// Ring component for Apple Watch-style progress
+interface RingProps {
+  current: number;
+  goal: number;
+  color: string;
+  size?: number;
+  strokeWidth?: number;
+}
+
+const Ring: FC<RingProps> = ({
+  current,
+  goal,
+  color,
+  size = 80,
+  strokeWidth = 8,
+}) => {
+  const radius = (size - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const progress = Math.min(current / goal, 1);
+  const strokeDasharray = circumference;
+  const strokeDashoffset = circumference - progress * circumference;
+
+  return (
+    <div className="relative inline-flex items-center justify-center">
+      <svg width={size} height={size} className="transform -rotate-90">
+        {/* Background circle */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke="#e5e7eb"
+          strokeWidth={strokeWidth}
+          fill="none"
+        />
+        {/* Progress circle */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          stroke={color}
+          strokeWidth={strokeWidth}
+          fill="none"
+          strokeDasharray={strokeDasharray}
+          strokeDashoffset={strokeDashoffset}
+          strokeLinecap="round"
+          className="transition-all duration-1000 ease-out"
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-sm font-semibold text-gray-800">
+          {Math.round((current / goal) * 100)}%
+        </span>
+      </div>
+    </div>
+  );
+};
+
 // DateField component for calendar picker
 interface DateFieldProps {
   date?: Date;
@@ -599,6 +696,92 @@ export default function HomePage() {
   const [selectedDate, setSelectedDate] = useState<Date>(
     new Date("2025-07-20")
   );
+  const [ringData, setRingData] = useState<RingData | null>(null);
+  const [heartRateData, setHeartRateData] = useState<HeartRateData | null>(
+    null
+  );
+  const [loading, setLoading] = useState(false);
+  const [heartRateLoading, setHeartRateLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [heartRateError, setHeartRateError] = useState<string | null>(null);
+
+  // Fetch ring data from API when date changes
+  useEffect(() => {
+    const fetchRingData = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const dateStr = format(selectedDate, "yyyy-MM-dd");
+        const response = await fetch(
+          `http://127.0.0.1:5000/api/rings?date=${dateStr}`,
+          {
+            credentials: "include",
+          }
+        );
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            setError("Please authenticate with Google Fit first");
+          } else {
+            setError(`Failed to fetch data: ${response.status}`);
+          }
+          return;
+        }
+
+        const data = await response.json();
+        console.log("Ring data received:", data); // Debug log
+        setRingData(data);
+      } catch (err) {
+        setError("Failed to connect to server");
+        console.error("Error fetching ring data:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchRingData();
+  }, [selectedDate]);
+
+  // Fetch heart rate data from API when date changes
+  useEffect(() => {
+    const fetchHeartRateData = async () => {
+      setHeartRateLoading(true);
+      setHeartRateError(null);
+
+      try {
+        const dateStr = format(selectedDate, "yyyy-MM-dd");
+        const response = await fetch(
+          `http://127.0.0.1:5000/api/heart-rate?date=${dateStr}`,
+          {
+            credentials: "include",
+          }
+        );
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            setHeartRateError("Please authenticate with Google Fit first");
+          } else {
+            setHeartRateError(
+              `Failed to fetch heart rate data: ${response.status}`
+            );
+          }
+          return;
+        }
+
+        const data = await response.json();
+        console.log("Heart rate data received:", data); // Debug log
+        setHeartRateData(data);
+      } catch (err) {
+        setHeartRateError("Failed to connect to server");
+        console.error("Error fetching heart rate data:", err);
+      } finally {
+        setHeartRateLoading(false);
+      }
+    };
+
+    fetchHeartRateData();
+  }, [selectedDate]);
 
   return (
     <div className="min-h-screen p-6 bg-[#fff3e2]">
@@ -661,7 +844,7 @@ export default function HomePage() {
                   <Settings className="mr-2 h-4 w-4" />
                   Manage
                 </DropdownMenuItem>
-                <DropdownMenuItem 
+                <DropdownMenuItem
                   className="flex items-center transition-colors"
                   onMouseEnter={(e) => {
                     e.currentTarget.style.backgroundColor = "#fef2f2";
@@ -694,14 +877,18 @@ export default function HomePage() {
             <span className="text-lg font-semibold text-gray-700 mr-4">
               Choose date:
             </span>
-            <DateField date={selectedDate} onChange={setSelectedDate} />
+            <DateField
+              date={selectedDate}
+              onChange={(d) => d && setSelectedDate(d)}
+            />
           </div>
         </div>
 
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Symptom Logs */}
-          <div className="lg:col-span-2">
+          {/* Left Side - Symptom Logs and Heart Rate */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Symptom Logs */}
             <Card className="bg-white/80 backdrop-blur-sm border-none rounded-2xl shadow-lg">
               <CardHeader>
                 <CardTitle className="text-gray-700 text-lg">
@@ -749,46 +936,199 @@ export default function HomePage() {
                 </div>
               </CardContent>
             </Card>
-          </div>
 
-          {/* Health Metrics Cards */}
-          <div className="space-y-6">
+            {/* Heart Rate */}
             <Card className="bg-white/80 backdrop-blur-sm border-none rounded-2xl shadow-lg">
               <CardHeader>
-                <CardTitle className="text-gray-700 text-lg">
+                <CardTitle className="text-gray-700 text-lg flex items-center">
+                  <Heart className="mr-2 h-5 w-5 text-red-500" />
                   Heart Rate
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="h-24 flex items-center justify-center text-gray-500">
-                  <p>No data available</p>
-                </div>
+                {heartRateLoading ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 border-t-red-500 rounded-full animate-spin"></div>
+                    <p className="text-sm text-gray-600">Loading...</p>
+                  </div>
+                ) : heartRateError ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-red-600 text-center">
+                      {heartRateError}
+                    </p>
+                  </div>
+                ) : heartRateData ? (
+                  <div className="flex gap-4">
+                    {/* Left Side - Stats */}
+                    <div className="w-48 flex flex-col justify-center space-y-3">
+                      {/* Summary Stats */}
+                      <div className="space-y-2">
+                        <div className="bg-red-50 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-600">Average</p>
+                          <p className="text-xl font-bold text-red-600">
+                            {heartRateData.summary.average} BPM
+                          </p>
+                        </div>
+                        <div className="bg-red-50 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-600">Min</p>
+                          <p className="text-xl font-bold text-red-600">
+                            {heartRateData.summary.min.toFixed(1)} BPM
+                          </p>
+                        </div>
+                        <div className="bg-red-50 rounded-lg p-3 text-center">
+                          <p className="text-xs text-gray-600">Max</p>
+                          <p className="text-xl font-bold text-red-600">
+                            {heartRateData.summary.max.toFixed(1)} BPM
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Data Points Count */}
+                      <div className="text-center">
+                        <p className="text-xs text-gray-600">
+                          {heartRateData.summary.count} measurements today
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Right Side - Graph */}
+                    {heartRateData.graph && (
+                      <div className="flex-1">
+                        <img
+                          src={`data:image/png;base64,${heartRateData.graph}`}
+                          alt="Heart Rate Fluctuations"
+                          className="w-full h-auto rounded-lg border border-gray-200"
+                        />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-gray-600">No data available</p>
+                  </div>
+                )}
               </CardContent>
             </Card>
+          </div>
 
+          {/* Right Side - Health Metrics Cards */}
+          <div className="space-y-6">
             <Card className="bg-white/80 backdrop-blur-sm border-none rounded-2xl shadow-lg">
               <CardHeader>
-                <CardTitle className="text-gray-700 text-lg">
+                <CardTitle className="text-gray-700 text-lg flex items-center">
+                  <Moon className="mr-2 h-5 w-5 text-blue-500" />
                   Sleep Duration
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="h-24 flex items-center justify-center text-gray-500">
-                  <p>No data available</p>
-                </div>
+                {loading ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 border-t-blue-500 rounded-full animate-spin"></div>
+                    <p className="text-sm text-gray-600">Loading...</p>
+                  </div>
+                ) : error ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-red-600 text-center">{error}</p>
+                  </div>
+                ) : ringData ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <Ring
+                      current={ringData.sleep.current}
+                      goal={ringData.sleep.goal}
+                      color="#3b82f6"
+                      size={100}
+                      strokeWidth={10}
+                    />
+                    <div className="text-center">
+                      <p className="text-lg font-semibold text-gray-800">
+                        {ringData.sleep.current}h
+                      </p>
+                      <p className="text-sm text-gray-600">
+                        Goal: {ringData.sleep.goal}h
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-gray-600">No data available</p>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
             <Card className="bg-white/80 backdrop-blur-sm border-none rounded-2xl shadow-lg">
               <CardHeader>
-                <CardTitle className="text-gray-700 text-lg">
-                  Energy Expended
+                <CardTitle className="text-gray-700 text-lg flex items-center">
+                  <Footprints className="mr-2 h-5 w-5 text-green-500" />
+                  Daily Steps
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="h-24 flex items-center justify-center text-gray-500">
-                  <p>No data available</p>
-                </div>
+                {loading ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 border-t-green-500 rounded-full animate-spin"></div>
+                    <p className="text-sm text-gray-600">Loading...</p>
+                  </div>
+                ) : error ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-red-600 text-center">{error}</p>
+                  </div>
+                ) : ringData ? (
+                  <div className="flex flex-col items-center space-y-3">
+                    <Ring
+                      current={
+                        ringData.steps?.current || ringData.energy?.current || 0
+                      }
+                      goal={
+                        ringData.steps?.goal || ringData.energy?.goal || 10000
+                      }
+                      color="#22c55e"
+                      size={100}
+                      strokeWidth={10}
+                    />
+                    <div className="text-center">
+                      <p className="text-lg font-semibold text-gray-800">
+                        {(
+                          ringData.steps?.current ||
+                          ringData.energy?.current ||
+                          0
+                        ).toLocaleString()}{" "}
+                        steps
+                      </p>
+                      <p className="text-sm text-gray-600">
+                        Goal:{" "}
+                        {(
+                          ringData.steps?.goal ||
+                          ringData.energy?.goal ||
+                          10000
+                        ).toLocaleString()}{" "}
+                        steps
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-20 h-20 border-4 border-gray-200 rounded-full flex items-center justify-center">
+                      <span className="text-gray-400 text-2xl">?</span>
+                    </div>
+                    <p className="text-sm text-gray-600">No data available</p>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>

@@ -350,6 +350,491 @@ def report():
     return jsonify(payload)
 
 
+@app.route("/api/rings")
+def rings():
+    """
+    ?date=YYYY-MM-DD  →  JSON with sleep and energy data for ring display.
+
+    Example front-end fetch (on port 5001):
+      fetch("http://127.0.0.1:5000/api/rings?date=2025-07-19")
+    """
+    date_str = request.args.get("date")
+    if not date_str:
+        abort(400, "date query parameter is required (YYYY-MM-DD)")
+
+    date_dt = dt.datetime.strptime(date_str, "%Y-%m-%d")
+    start_dt = date_dt
+    end_dt = date_dt + dt.timedelta(days=1) - dt.timedelta(milliseconds=1)
+
+    # 1️⃣  rebuild credentials from the session and refresh if needed
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)     # ← make UTC-naive
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())  # keep fresh
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+
+    # 2️⃣  pull sleep data for the specific date
+    sleep_daily = _daily_sleep_minutes(
+        fitness,
+        _millis(start_dt),
+        _millis(end_dt),
+    )
+    
+    # 3️⃣  pull step data for the specific date
+    steps_daily = _daily_buckets(
+        fitness,
+        "com.google.step_count.delta",
+        _millis(start_dt),
+        _millis(end_dt),
+    )
+
+    # 4️⃣  extract values for the specific date
+    sleep_minutes = sleep_daily[0]["value"] if sleep_daily else 0
+    sleep_hours = sleep_minutes / 60.0
+    
+    steps_count = steps_daily[0]["value"] if steps_daily else 0
+
+    # 5️⃣  define goals (these could be configurable)
+    sleep_goal_hours = 8.0
+    steps_goal = 10000
+
+    # 6️⃣  return ring data
+    payload = {
+        "date": date_str,
+        "sleep": {
+            "current": round(sleep_hours, 1),
+            "goal": sleep_goal_hours,
+            "percentage": min(round((sleep_hours / sleep_goal_hours) * 100), 100)
+        },
+        "steps": {
+            "current": steps_count,
+            "goal": steps_goal,
+            "percentage": min(round((steps_count / steps_goal) * 100), 100)
+        }
+    }
+    
+    return jsonify(payload)
+
+
+@app.route("/api/heart-rate")
+def heart_rate():
+    """
+    ?date=YYYY-MM-DD  →  JSON with heart rate data and base64 graph.
+
+    Example front-end fetch (on port 5001):
+      fetch("http://127.0.0.1:5000/api/heart-rate?date=2025-07-19")
+    """
+    date_str = request.args.get("date")
+    if not date_str:
+        abort(400, "date query parameter is required (YYYY-MM-DD)")
+
+    date_dt = dt.datetime.strptime(date_str, "%Y-%m-%d")
+    start_dt = date_dt
+    end_dt = date_dt + dt.timedelta(days=1) - dt.timedelta(milliseconds=1)
+
+    # 1️⃣  rebuild credentials from the session and refresh if needed
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)     # ← make UTC-naive
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())  # keep fresh
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+
+    # 2️⃣  pull heart rate data points for the specific date
+    heart_rate_data = _get_heart_rate_points(
+        fitness,
+        _millis(start_dt),
+        _millis(end_dt),
+    )
+
+    # 3️⃣  generate heart rate graph
+    heart_rate_png = _plot_heart_rate(heart_rate_data, date_str)
+
+    # 4️⃣  calculate summary statistics
+    if heart_rate_data:
+        values = [point["value"] for point in heart_rate_data]
+        avg_hr = sum(values) / len(values)
+        min_hr = min(values)
+        max_hr = max(values)
+    else:
+        avg_hr = min_hr = max_hr = 0
+
+    # 5️⃣  return heart rate data
+    payload = {
+        "date": date_str,
+        "data_points": heart_rate_data,
+        "summary": {
+            "average": round(avg_hr, 1),
+            "min": min_hr,
+            "max": max_hr,
+            "count": len(heart_rate_data)
+        },
+        "graph": heart_rate_png
+    }
+    
+    return jsonify(payload)
+
+
+def _get_heart_rate_points(service, start_ms: int, end_ms: int):
+    """Get individual heart rate data points for detailed analysis."""
+    iso = lambda ms: dt.datetime.utcfromtimestamp(ms / 1000).isoformat() + "Z"
+    
+    logging.debug("--------- HEART RATE DEBUG ---------")
+    logging.debug("Query window  : %s  →  %s", iso(start_ms), iso(end_ms))
+
+    heart_rate_data = []
+    
+    # Try using the aggregate endpoint first (most reliable)
+    try:
+        logging.debug("Trying aggregate heart rate endpoint...")
+        aggregate_resp = service.users().dataset().aggregate(
+            userId="me",
+            body={
+                "aggregateBy": [{"dataTypeName": "com.google.heart_rate.bpm"}],
+                "bucketByTime": {"durationMillis": 1800000},  # 30 minute buckets for more detail
+                "startTimeMillis": start_ms,
+                "endTimeMillis": end_ms,
+            }
+        ).execute()
+        
+        logging.debug("Aggregate heart rate response: %s", aggregate_resp)
+        
+        for bucket in aggregate_resp.get("bucket", []):
+            for dataset in bucket.get("dataset", []):
+                for point in dataset.get("point", []):
+                    # Handle different timestamp formats
+                    timestamp = 0
+                    if "startTimeMillis" in point:
+                        timestamp = int(point["startTimeMillis"])
+                    elif "startTimeNanos" in point:
+                        timestamp = int(point["startTimeNanos"]) // 1_000_000  # Convert to milliseconds
+                    
+                    # Try different value field names
+                    value = 0
+                    if point.get("value"):
+                        # Handle array of values - take the first one
+                        value_obj = point["value"][0]
+                        value = value_obj.get("fpVal", value_obj.get("intVal", 0))
+                    
+                    # Convert to local time for display
+                    if timestamp > 0:
+                        utc_time = dt.datetime.utcfromtimestamp(timestamp / 1000)
+                        local_time = utc_time.strftime("%H:%M")
+                        
+                        heart_rate_data.append({
+                            "time": local_time,
+                            "timestamp": timestamp,
+                            "value": value
+                        })
+        
+        logging.debug("Aggregate method found %s heart rate points", len(heart_rate_data))
+        
+    except Exception as e:
+        logging.debug("Aggregate heart rate failed: %s", str(e))
+        
+        # Fallback: try to list data sources and use specific ones
+        try:
+            data_sources_resp = service.users().dataSources().list(userId="me").execute()
+            heart_rate_sources = []
+            
+            for ds in data_sources_resp.get("dataSource", []):
+                if "heart_rate" in ds.get("dataType", {}).get("name", "").lower():
+                    heart_rate_sources.append({
+                        "id": ds.get("dataStreamId", "unknown"),  # Use dataStreamId
+                        "name": ds.get("dataType", {}).get("name", "unknown"),
+                        "type": ds.get("type", "unknown")
+                    })
+                    logging.debug("Found heart rate source: %s (%s)", ds.get("dataStreamId"), ds.get("dataType", {}).get("name"))
+            
+            logging.debug("Available heart rate sources: %s", heart_rate_sources)
+            
+            # Try each heart rate source
+            for source in heart_rate_sources:
+                if heart_rate_data:  # If we already have data, skip
+                    break
+                    
+                try:
+                    logging.debug("Trying heart rate source: %s", source["id"])
+                    resp = service.users().dataSources().datasets().get(
+                        userId="me",
+                        dataSourceId=source["id"],
+                        datasetId=f"{start_ms}-{end_ms}",
+                    ).execute()
+                    
+                    points = resp.get("point", [])
+                    logging.debug("Source %s found %s points", source["id"], len(points))
+                    
+                    for point in points:
+                        timestamp = int(point["startTimeNanos"]) // 1_000_000  # Convert to milliseconds
+                        # Try different value field names
+                        value = 0
+                        if point.get("value"):
+                            value_obj = point["value"][0]
+                            value = value_obj.get("fpVal", value_obj.get("intVal", 0))
+                        
+                        # Convert to local time for display
+                        utc_time = dt.datetime.utcfromtimestamp(timestamp / 1000)
+                        local_time = utc_time.strftime("%H:%M")
+                        
+                        heart_rate_data.append({
+                            "time": local_time,
+                            "timestamp": timestamp,
+                            "value": value
+                        })
+                        
+                except Exception as e2:
+                    logging.debug("Source %s failed: %s", source["id"], str(e2))
+        
+        except Exception as e3:
+            logging.debug("Failed to list data sources: %s", str(e3))
+    
+    logging.debug("Final result: %s heart rate points", len(heart_rate_data))
+    logging.debug("--------- /HEART RATE DEBUG --------")
+    
+    return heart_rate_data
+
+
+def _plot_heart_rate(heart_rate_data, date_str):
+    """Create a line graph of heart rate fluctuations throughout the day."""
+    if not heart_rate_data:
+        # Return empty graph if no data
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, 'No heart rate data available', 
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=14, color='gray')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+        
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    # Extract data for plotting
+    times = [point["time"] for point in heart_rate_data]
+    values = [point["value"] for point in heart_rate_data]
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot heart rate line
+    ax.plot(range(len(times)), values, color='#dc2626', linewidth=2, marker='o', markersize=4)
+    
+    # Customize the plot
+    ax.set_xlabel('Time of Day', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Heart Rate (BPM)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Heart Rate Fluctuations - {date_str}', fontsize=14, fontweight='bold')
+    
+    # Set x-axis ticks to show time labels
+    if len(times) > 0:
+        # Show every nth time label to avoid crowding
+        n = max(1, len(times) // 8)
+        tick_positions = list(range(0, len(times), n))
+        tick_labels = [times[i] for i in tick_positions]
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=45, ha='right')
+    
+    # Add grid for better readability
+    ax.grid(True, alpha=0.3, linestyle='--')
+    
+    # Set y-axis limits with some padding
+    if values:
+        min_val = min(values)
+        max_val = max(values)
+        padding = (max_val - min_val) * 0.1 if max_val > min_val else 10
+        ax.set_ylim(max(0, min_val - padding), max_val + padding)
+    
+    # Add average line
+    if values:
+        avg_hr = sum(values) / len(values)
+        ax.axhline(y=avg_hr, color='#f97316', linestyle='--', alpha=0.7, 
+                  label=f'Average: {avg_hr:.1f} BPM')
+        ax.legend()
+    
+    # Style improvements
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Convert to base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
+                facecolor='white', edgecolor='none')
+    plt.close(fig)
+    
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+@app.route("/api/debug/sources")
+def debug_sources():
+    """Debug endpoint to list all available data sources."""
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+    
+    try:
+        data_sources_resp = fitness.users().dataSources().list(userId="me").execute()
+        sources = []
+        
+        logging.debug("Raw data sources response: %s", data_sources_resp)
+        
+        for ds in data_sources_resp.get("dataSource", []):
+            try:
+                # Debug: print the raw data source to see its structure
+                logging.debug("Raw data source: %s", ds)
+                
+                source_info = {
+                    "id": ds.get("dataStreamId", "unknown"),  # Use dataStreamId instead of dataSourceId
+                    "name": ds.get("dataType", {}).get("name", "unknown"),
+                    "type": ds.get("type", "unknown"),
+                    "device": ds.get("device", {}).get("model", "Unknown")
+                }
+                sources.append(source_info)
+                logging.debug("Processed source: %s", source_info)
+            except Exception as e:
+                logging.debug("Error processing source %s: %s", ds, str(e))
+                sources.append({
+                    "id": "error",
+                    "name": "error_processing",
+                    "type": "error",
+                    "device": "Unknown",
+                    "raw_data": str(ds)
+                })
+        
+        heart_rate_sources = []
+        for s in sources:
+            if "heart_rate" in s["name"].lower():
+                heart_rate_sources.append(s)
+        
+        return jsonify({
+            "total_sources": len(sources),
+            "sources": sources,
+            "heart_rate_sources": heart_rate_sources,
+            "raw_response": data_sources_resp
+        })
+        
+    except Exception as e:
+        logging.debug("Debug sources error: %s", str(e))
+        return jsonify({"error": str(e), "traceback": str(e.__traceback__)})
+
+
+@app.route("/api/debug/test")
+def debug_test():
+    """Simple test endpoint to verify field extraction."""
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+    
+    try:
+        data_sources_resp = fitness.users().dataSources().list(userId="me").execute()
+        
+        # Test with first heart rate source
+        heart_rate_sources = []
+        for ds in data_sources_resp.get("dataSource", []):
+            if "heart_rate" in ds.get("dataType", {}).get("name", "").lower():
+                heart_rate_sources.append(ds)
+        
+        if heart_rate_sources:
+            test_source = heart_rate_sources[0]
+            return jsonify({
+                "test_source": test_source,
+                "dataStreamId": test_source.get("dataStreamId"),
+                "dataSourceId": test_source.get("dataSourceId"),
+                "all_keys": list(test_source.keys())
+            })
+        else:
+            return jsonify({"error": "No heart rate sources found"})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/api/debug/heart-test")
+def debug_heart_test():
+    """Test heart rate with a specific known data stream ID."""
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+    
+    try:
+        # Test with June 14, 2025 (when user mentioned they have heart rate data)
+        test_date = dt.date(2025, 6, 14)
+        start_ms = _millis(dt.datetime.combine(test_date, dt.time.min))
+        end_ms = _millis(dt.datetime.combine(test_date, dt.time.max))
+        
+        # Try the specific data stream ID we know exists
+        test_stream_id = "derived:com.google.heart_rate.bpm:com.google.android.gms:merge_heart_rate_bpm"
+        
+        try:
+            resp = fitness.users().dataSources().datasets().get(
+                userId="me",
+                dataSourceId=test_stream_id,
+                datasetId=f"{start_ms}-{end_ms}",
+            ).execute()
+            
+            return jsonify({
+                "success": True,
+                "dataStreamId": test_stream_id,
+                "response": resp,
+                "points_count": len(resp.get("point", [])),
+                "points": resp.get("point", [])[:3]  # First 3 points for inspection
+            })
+            
+        except Exception as e:
+            return jsonify({
+                "success": False,
+                "dataStreamId": test_stream_id,
+                "error": str(e)
+            })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 # ──────────────────────────────────────────────────────────────────────
