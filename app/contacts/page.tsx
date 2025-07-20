@@ -143,12 +143,14 @@ export default function ContactsPage() {
                   Manage
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  className="flex items-center"
+                  className="flex items-center transition-colors"
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = "rgb(254 226 226)";
+                    e.currentTarget.style.backgroundColor = "#fef2f2";
+                    e.currentTarget.style.color = "#dc2626";
                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.backgroundColor = "";
+                    e.currentTarget.style.color = "";
                   }}
                 >
                   <LogOut className="mr-2 h-4 w-4" />

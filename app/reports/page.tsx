@@ -165,7 +165,17 @@ export default function ReportPage() {
                   <Settings className="mr-2 h-4 w-4" />
                   Manage
                 </DropdownMenuItem>
-                <DropdownMenuItem className="flex items-center hover:bg-red-100">
+                <DropdownMenuItem 
+                  className="flex items-center transition-colors"
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = "#fef2f2";
+                    e.currentTarget.style.color = "#dc2626";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = "";
+                    e.currentTarget.style.color = "";
+                  }}
+                >
                   <LogOut className="mr-2 h-4 w-4" />
                   Log Out
                 </DropdownMenuItem>

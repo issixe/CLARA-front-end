@@ -296,7 +296,7 @@ export default function HomePage() {
               style={{
                 color: "#F5CC98",
               }}
-            > 
+            >
               CLARA
             </h1>
 
