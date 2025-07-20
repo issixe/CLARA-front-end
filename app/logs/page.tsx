@@ -89,7 +89,9 @@ export default function HomePage() {
                 <ChevronDown className="ml-1 h-4 w-4" />
               </DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuItem>Logs</DropdownMenuItem>
+                <Link href="/logs">
+                  <DropdownMenuItem>Logs</DropdownMenuItem>
+                </Link>
                 <Link href="/reports">
                   <DropdownMenuItem>Reports</DropdownMenuItem>
                 </Link>

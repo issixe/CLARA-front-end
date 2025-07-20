@@ -117,8 +117,12 @@ export default function ContactsPage() {
                 <ChevronDown className="ml-1 h-4 w-4" />
               </DropdownMenuTrigger>
               <DropdownMenuContent>
-                <DropdownMenuItem>Logs</DropdownMenuItem>
-                <DropdownMenuItem>Reports</DropdownMenuItem>
+                <Link href="/logs">
+                  <DropdownMenuItem>Logs</DropdownMenuItem>
+                </Link>
+                <Link href="/reports">
+                  <DropdownMenuItem>Reports</DropdownMenuItem>
+                </Link>
               </DropdownMenuContent>
             </DropdownMenu>
 
