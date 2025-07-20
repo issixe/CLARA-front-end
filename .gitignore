@@ -25,3 +25,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+flask.log
+client_secret.json
+/public/reports
+/static

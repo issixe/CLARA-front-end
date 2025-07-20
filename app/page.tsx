@@ -305,11 +305,11 @@ export default function HomePage() {
               needs so you don't have to.
             </p>
 
-            <Link href="/logs" className="block mt-8">
+            <a href="http://127.0.0.1:5000/authorize" className="block mt-8">
               <Button className="bg-[#F099C1] hover:bg-[#EA83B3] text-white font-semibold py-3 px-6 rounded-2xl">
                 Sign in with Google
               </Button>
-            </Link>
+            </a>
           </CardContent>
         </Card>
       </div>
