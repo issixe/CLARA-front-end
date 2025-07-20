@@ -1,3 +1,5 @@
+"use client";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import Image from "next/image";
@@ -10,6 +12,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ChevronDown } from "lucide-react";
+
+
 
 export default function HomePage() {
   return (
@@ -305,11 +309,12 @@ export default function HomePage() {
               needs so you don't have to.
             </p>
 
-            <Link href="/logs" className="block mt-8">
-              <Button className="bg-[#F099C1] hover:bg-[#EA83B3] text-white font-semibold py-3 px-6 rounded-2xl">
-                Sign in with Google
-              </Button>
-            </Link>
+            <Button
+              onClick={() => (window.location.href = "/authorize")}
+              className="block mt-8 bg-[#F099C1] hover:bg-[#EA83B3] text-white font-semibold py-3 px-6 rounded-2xl"
+            >
+              Sign in with Google
+            </Button>
           </CardContent>
         </Card>
       </div>
