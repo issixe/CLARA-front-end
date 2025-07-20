@@ -41,6 +41,12 @@ import logging
 logging.basicConfig(level=logging.DEBUG, format="DBG %(message)s")
 from pathlib import Path
 from flask_cors import CORS
+import requests
+from dotenv import load_dotenv
+import re
+
+# Load environment variables
+load_dotenv()
 
 
 
@@ -67,6 +73,16 @@ SCOPES = [
 ]
 
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")  # dev-only
+
+# Vellum Configuration
+VELLUM_API_KEY = os.getenv("VELLUM_API_KEY")
+VELLUM_BASE_URL = "https://api.vellum.ai/v1"
+
+# Check if Vellum is configured
+if VELLUM_API_KEY:
+    logging.info("Vellum API Key found")
+else:
+    logging.warning("VELLUM_API_KEY not found in environment variables")
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
@@ -107,7 +123,7 @@ def _daily_sleep_minutes(service, start_ms: int, end_ms: int):
 
     sessions = sess_resp.get("session", [])
     logging.debug("Sessions found: %s", len(sessions))
-    for s in sessions[:3]:           # print at most first 3 so log isn’t huge
+    for s in sessions[:3]:           # print at most first 3 so log isn't huge
         logging.debug("  • %s → %s  (%s)",
                       s["startTimeMillis"], s["endTimeMillis"],
                       s.get("name", "no name"))
@@ -259,6 +275,148 @@ def _daily_buckets(service, data_type: str, start_ms: int, end_ms: int):
         daily.append({"date": date, "value": total})
     return daily
 
+
+def _daily_heart_rate_summary(service, start_ms: int, end_ms: int):
+    """Get daily heart rate summary statistics using the same approach as the working heart-rate endpoint."""
+    try:
+        # Get all heart rate points for the date range
+        all_heart_rate_data = _get_heart_rate_points(service, start_ms, end_ms)
+        
+        # Group by date and calculate daily summaries
+        daily_summaries = {}
+        
+        for point in all_heart_rate_data:
+            # Convert timestamp to date
+            date = dt.datetime.utcfromtimestamp(point["timestamp"] / 1000).date().isoformat()
+            
+            if date not in daily_summaries:
+                daily_summaries[date] = []
+            
+            daily_summaries[date].append(point["value"])
+        
+        # Convert to the expected format
+        daily = []
+        for date, values in daily_summaries.items():
+            if values:
+                daily.append({
+                    "date": date,
+                    "average": round(sum(values) / len(values), 1),
+                    "min": round(min(values), 1),
+                    "max": round(max(values), 1),
+                    "count": len(values)
+                })
+            else:
+                daily.append({
+                    "date": date,
+                    "average": 0,
+                    "min": 0,
+                    "max": 0,
+                    "count": 0
+                })
+        
+        return daily
+        
+    except Exception as e:
+        logging.warning("Heart rate data not available: %s", str(e))
+        # Return empty data structure
+        return []
+
+
+def _daily_exercise_minutes(service, start_ms: int, end_ms: int):
+    """Get daily exercise minutes (active minutes)."""
+    try:
+        body = {
+            "aggregateBy": [{"dataTypeName": "com.google.active_minutes"}],
+            "bucketByTime": {"durationMillis": 86_400_000},
+            "startTimeMillis": start_ms,
+            "endTimeMillis": end_ms,
+        }
+        resp = (
+            service.users()
+            .dataset()
+            .aggregate(userId="me", body=body)
+            .execute()
+        )
+
+        daily = []
+        for bucket in resp.get("bucket", []):
+            date = dt.datetime.fromtimestamp(int(bucket["startTimeMillis"]) / 1000, tz=dt.timezone.utc).date().isoformat()
+            total = sum(
+                p.get("value", [{}])[0].get("intVal", 0)
+                for dataset in bucket.get("dataset", [])
+                for p in dataset.get("point", [])
+            )
+            daily.append({"date": date, "value": total})
+        return daily
+        
+    except Exception as e:
+        logging.warning("Exercise minutes data not available: %s", str(e))
+        return []
+
+
+def _daily_calories(service, start_ms: int, end_ms: int):
+    """Get daily calories burned."""
+    try:
+        body = {
+            "aggregateBy": [{"dataTypeName": "com.google.calories.expended"}],
+            "bucketByTime": {"durationMillis": 86_400_000},
+            "startTimeMillis": start_ms,
+            "endTimeMillis": end_ms,
+        }
+        resp = (
+            service.users()
+            .dataset()
+            .aggregate(userId="me", body=body)
+            .execute()
+        )
+
+        daily = []
+        for bucket in resp.get("bucket", []):
+            date = dt.datetime.fromtimestamp(int(bucket["startTimeMillis"]) / 1000, tz=dt.timezone.utc).date().isoformat()
+            total = sum(
+                p.get("value", [{}])[0].get("fpVal", 0)
+                for dataset in bucket.get("dataset", [])
+                for p in dataset.get("point", [])
+            )
+            daily.append({"date": date, "value": round(total, 0)})
+        return daily
+        
+    except Exception as e:
+        logging.warning("Calories data not available: %s", str(e))
+        return []
+
+
+def _daily_distance(service, start_ms: int, end_ms: int):
+    """Get daily distance traveled in meters."""
+    try:
+        body = {
+            "aggregateBy": [{"dataTypeName": "com.google.distance.delta"}],
+            "bucketByTime": {"durationMillis": 86_400_000},
+            "startTimeMillis": start_ms,
+            "endTimeMillis": end_ms,
+        }
+        resp = (
+            service.users()
+            .dataset()
+            .aggregate(userId="me", body=body)
+            .execute()
+        )
+
+        daily = []
+        for bucket in resp.get("bucket", []):
+            date = dt.datetime.fromtimestamp(int(bucket["startTimeMillis"]) / 1000, tz=dt.timezone.utc).date().isoformat()
+            total = sum(
+                p.get("value", [{}])[0].get("fpVal", 0)
+                for dataset in bucket.get("dataset", [])
+                for p in dataset.get("point", [])
+            )
+            daily.append({"date": date, "value": round(total, 0)})
+        return daily
+        
+    except Exception as e:
+        logging.warning("Distance data not available: %s", str(e))
+        return []
+
 def _plot_bars(daily, y_label, title):
     """Return base-64 PNG bar chart for the [{date,value}] list passed in."""
     dates = [d["date"] for d in daily]
@@ -348,6 +506,739 @@ def report():
         "sleep_data": sleep_daily,
     }
     return jsonify(payload)
+
+
+@app.route("/api/comprehensive-report")
+def comprehensive_report():
+    """
+    ?start=YYYY-MM-DD&end=YYYY-MM-DD  →  Comprehensive fitness data for Vellum reports.
+
+    Example front-end fetch (on port 5001):
+      fetch("http://127.0.0.1:5000/api/comprehensive-report?start=2025-07-01&end=2025-07-07")
+    """
+    start_str = request.args.get("start")
+    end_str = request.args.get("end")
+    if not (start_str and end_str):
+        abort(400, "start and end query parameters are required (YYYY-MM-DD)")
+
+    start_dt = dt.datetime.strptime(start_str, "%Y-%m-%d")
+    # inclusive: extend to end-of-day
+    end_dt = dt.datetime.strptime(end_str, "%Y-%m-%d") + dt.timedelta(days=1) - dt.timedelta(milliseconds=1)
+
+    # 1️⃣  rebuild credentials from the session and refresh if needed
+    tokens = session.get("tokens")
+    if not tokens:
+        abort(401, "not authenticated")
+    if isinstance(tokens.get("expiry"), str):
+        exp = dt.datetime.fromisoformat(tokens["expiry"].replace("Z", "+00:00"))
+        tokens["expiry"] = exp.replace(tzinfo=None)     # ← make UTC-naive
+    creds = Credentials(**tokens)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        session["tokens"] = json.loads(creds.to_json())  # keep fresh
+
+    fitness = build("fitness", "v1", credentials=creds, cache_discovery=False)
+
+    # 2️⃣  pull comprehensive fitness data
+    start_date = start_dt.date()
+    end_date = end_dt.date()
+    
+    # Basic metrics
+    steps_daily = _daily_buckets(fitness, "com.google.step_count.delta", _millis(start_dt), _millis(end_dt))
+    sleep_daily = _daily_sleep_minutes(fitness, _millis(start_dt), _millis(end_dt))
+    
+    # Enhanced metrics
+    heart_rate_daily = _daily_heart_rate_summary(fitness, _millis(start_dt), _millis(end_dt))
+    exercise_minutes_daily = _daily_exercise_minutes(fitness, _millis(start_dt), _millis(end_dt))
+    calories_daily = _daily_calories(fitness, _millis(start_dt), _millis(end_dt))
+    distance_daily = _daily_distance(fitness, _millis(start_dt), _millis(end_dt))
+
+    # 3️⃣  fill gaps and ensure all dates are present
+    steps_daily = _fill_gaps(steps_daily, start_date, end_date)
+    sleep_daily = _fill_gaps(sleep_daily, start_date, end_date)
+    exercise_minutes_daily = _fill_gaps(exercise_minutes_daily, start_date, end_date)
+    calories_daily = _fill_gaps(calories_daily, start_date, end_date)
+    distance_daily = _fill_gaps(distance_daily, start_date, end_date)
+    
+    # Special handling for heart rate data (has different structure)
+    existing_hr = {d["date"]: d for d in heart_rate_daily}
+    heart_rate_daily = []
+    cur = start_date
+    while cur <= end_date:
+        iso = cur.isoformat()
+        if iso in existing_hr:
+            heart_rate_daily.append(existing_hr[iso])
+        else:
+            heart_rate_daily.append({
+                "date": iso,
+                "average": 0,
+                "min": 0,
+                "max": 0,
+                "count": 0
+            })
+        cur += dt.timedelta(days=1)
+
+    # 4️⃣  generate graphs
+    steps_png = _plot_bars(steps_daily, "Steps", "Daily Step Count")
+    sleep_png = _plot_bars(sleep_daily, "Minutes asleep", "Nightly Sleep Duration")
+    exercise_png = _plot_bars(exercise_minutes_daily, "Minutes", "Daily Exercise Minutes")
+    calories_png = _plot_bars(calories_daily, "Calories", "Daily Calories Burned")
+    
+    # Convert distance from meters to kilometers for display
+    distance_km_daily = [{"date": d["date"], "value": round(d["value"] / 1000, 2)} for d in distance_daily]
+    distance_png = _plot_bars(distance_km_daily, "Kilometers", "Daily Distance Traveled")
+
+    # 5️⃣  save graphs to files
+    steps_fname = f"steps_{start_str}_{end_str}.png"
+    sleep_fname = f"sleep_{start_str}_{end_str}.png"
+    exercise_fname = f"exercise_{start_str}_{end_str}.png"
+    calories_fname = f"calories_{start_str}_{end_str}.png"
+    distance_fname = f"distance_{start_str}_{end_str}.png"
+    
+    steps_path = os.path.join(app.static_folder, steps_fname)
+    sleep_path = os.path.join(app.static_folder, sleep_fname)
+    exercise_path = os.path.join(app.static_folder, exercise_fname)
+    calories_path = os.path.join(app.static_folder, calories_fname)
+    distance_path = os.path.join(app.static_folder, distance_fname)
+    
+    _write_bar_png(steps_daily, "Steps", "Daily Step Count", steps_path)
+    _write_bar_png(sleep_daily, "Minutes asleep", "Nightly Sleep Duration", sleep_path)
+    _write_bar_png(exercise_minutes_daily, "Minutes", "Daily Exercise Minutes", exercise_path)
+    _write_bar_png(calories_daily, "Calories", "Daily Calories Burned", calories_path)
+    _write_bar_png(distance_km_daily, "Kilometers", "Daily Distance Traveled", distance_path)
+    
+    NEXT_PUBLIC_DIR = Path(__file__).resolve().parent / "public" / "reports"
+    NEXT_PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
+
+    # copy (or symlink) into Next/public/reports
+    import shutil
+    shutil.copy2(steps_path, NEXT_PUBLIC_DIR / steps_fname)
+    shutil.copy2(sleep_path, NEXT_PUBLIC_DIR / sleep_fname)
+    shutil.copy2(exercise_path, NEXT_PUBLIC_DIR / exercise_fname)
+    shutil.copy2(calories_path, NEXT_PUBLIC_DIR / calories_fname)
+    shutil.copy2(distance_path, NEXT_PUBLIC_DIR / distance_fname)
+
+    # 6️⃣  calculate summary statistics for Vellum
+    def calculate_summary_stats(data_list, key="value"):
+        if not data_list:
+            return {"total": 0, "average": 0, "min": 0, "max": 0, "days_with_data": 0}
+        
+        values = [d[key] for d in data_list if d[key] > 0]
+        days_with_data = len(values)
+        
+        if not values:
+            return {"total": 0, "average": 0, "min": 0, "max": 0, "days_with_data": 0}
+        
+        return {
+            "total": sum(values),
+            "average": round(sum(values) / len(values), 1),
+            "min": min(values),
+            "max": max(values),
+            "days_with_data": days_with_data
+        }
+
+    # 7️⃣  prepare comprehensive payload for Vellum
+    payload = {
+        "window": {"start": start_str, "end": end_str},
+        "total_days": len(steps_daily),
+        
+        # Physical Activity Data
+        "physical_activity": {
+            "steps": {
+                "daily_data": steps_daily,
+                "summary": calculate_summary_stats(steps_daily),
+                "graph": steps_png
+            },
+            "exercise_minutes": {
+                "daily_data": exercise_minutes_daily,
+                "summary": calculate_summary_stats(exercise_minutes_daily),
+                "graph": exercise_png
+            },
+            "calories": {
+                "daily_data": calories_daily,
+                "summary": calculate_summary_stats(calories_daily),
+                "graph": calories_png
+            },
+            "distance": {
+                "daily_data": distance_km_daily,
+                "summary": calculate_summary_stats(distance_km_daily),
+                "graph": distance_png
+            }
+        },
+        
+        # Sleep Data
+        "sleep": {
+            "duration": {
+                "daily_data": sleep_daily,
+                "summary": calculate_summary_stats(sleep_daily),
+                "graph": sleep_png
+            },
+            "heart_rate": {
+                "daily_data": heart_rate_daily,
+                "summary": {
+                    "average_hr": round(sum(d["average"] for d in heart_rate_daily if d["average"] > 0) / max(1, len([d for d in heart_rate_daily if d["average"] > 0])), 1) if heart_rate_daily else 0,
+                    "min_hr": min((d["min"] for d in heart_rate_daily if d["min"] > 0), default=0),
+                    "max_hr": max((d["max"] for d in heart_rate_daily if d["max"] > 0), default=0),
+                    "days_with_data": len([d for d in heart_rate_daily if d["average"] > 0])
+                }
+            }
+        },
+        
+        # Overall Health Summary
+        "health_summary": {
+            "total_steps": sum(d["value"] for d in steps_daily) if steps_daily else 0,
+            "total_exercise_minutes": sum(d["value"] for d in exercise_minutes_daily) if exercise_minutes_daily else 0,
+            "total_calories": sum(d["value"] for d in calories_daily) if calories_daily else 0,
+            "total_distance_km": sum(d["value"] for d in distance_km_daily) if distance_km_daily else 0,
+            "total_sleep_hours": round(sum(d["value"] for d in sleep_daily) / 60, 1) if sleep_daily else 0,
+            "average_sleep_hours": round(sum(d["value"] for d in sleep_daily) / (60 * len(sleep_daily)), 1) if sleep_daily else 0
+        }
+    }
+    
+    return jsonify(payload)
+
+
+@app.route("/api/generate-vellum-reports", methods=["POST"])
+def generate_vellum_reports():
+    """
+    Generate detailed physical activity and sleep reports using Vellum API.
+    Expects comprehensive fitness data in request body.
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            abort(400, "No data provided")
+        
+
+        
+        # Extract data from the comprehensive report
+        window = data.get("window", {})
+        physical_activity = data.get("physical_activity", {})
+        sleep = data.get("sleep", {})
+        health_summary = data.get("health_summary", {})
+        
+        # Prepare data for Vellum
+        fitness_summary = {
+            "date_range": f"{window.get('start', '')} to {window.get('end', '')}",
+            "total_days": data.get("total_days", 0),
+            "steps": {
+                "total": health_summary.get("total_steps", 0),
+                "average_per_day": physical_activity.get("steps", {}).get("summary", {}).get("average", 0),
+                "days_with_data": physical_activity.get("steps", {}).get("summary", {}).get("days_with_data", 0)
+            },
+            "exercise": {
+                "total_minutes": health_summary.get("total_exercise_minutes", 0),
+                "average_per_day": physical_activity.get("exercise_minutes", {}).get("summary", {}).get("average", 0),
+                "days_with_data": physical_activity.get("exercise_minutes", {}).get("summary", {}).get("days_with_data", 0)
+            },
+            "calories": {
+                "total_burned": health_summary.get("total_calories", 0),
+                "average_per_day": physical_activity.get("calories", {}).get("summary", {}).get("average", 0),
+                "days_with_data": physical_activity.get("calories", {}).get("summary", {}).get("days_with_data", 0)
+            },
+            "distance": {
+                "total_km": health_summary.get("total_distance_km", 0),
+                "average_per_day": physical_activity.get("distance", {}).get("summary", {}).get("average", 0),
+                "days_with_data": physical_activity.get("distance", {}).get("summary", {}).get("days_with_data", 0)
+            },
+            "sleep": {
+                "total_hours": health_summary.get("total_sleep_hours", 0),
+                "average_per_night": health_summary.get("average_sleep_hours", 0),
+                "days_with_data": sleep.get("duration", {}).get("summary", {}).get("days_with_data", 0)
+            },
+            "heart_rate": {
+                "average_resting": sleep.get("heart_rate", {}).get("summary", {}).get("average_hr", 0),
+                "min_resting": sleep.get("heart_rate", {}).get("summary", {}).get("min_hr", 0),
+                "max_resting": sleep.get("heart_rate", {}).get("summary", {}).get("max_hr", 0),
+                "days_with_data": sleep.get("heart_rate", {}).get("summary", {}).get("days_with_data", 0)
+            }
+        }
+        
+        # Generate Physical Activity Report using Vellum
+        physical_activity_report = generate_vellum_physical_activity_report(fitness_summary)
+        physical_activity_report = _normalize_report(physical_activity_report)
+        
+        # Generate Sleep Report using Vellum
+        sleep_report = generate_vellum_sleep_report(fitness_summary)
+        sleep_report = _normalize_report(sleep_report)
+        
+        return jsonify({
+            "physical_activity_report": physical_activity_report,
+            "sleep_report": sleep_report,
+            "generated_at": dt.datetime.now().isoformat(),
+            "vellum_used": True,
+            "analysis_type": "Vellum AI"
+        })
+        
+    except Exception as e:
+        logging.error("Error generating Vellum reports: %s", str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+def _parse_vellum_template(template_str, data):
+    """Parse Vellum template string and replace placeholders with actual data."""
+    # Remove JSON code block markers if present
+    template_str = template_str.strip('`').replace('```json\n', '').replace('\n```', '')
+    
+    # First replace all the direct value mappings
+    replacements = {
+        "{{date_range}}": data["date_range"],
+        "{{total_steps}}": data["steps"]["total"],
+        "{{avg_steps}}": data["steps"]["average_per_day"],
+        "{{steps_days}}": data["steps"]["days_with_data"],
+        "{{total_exercise}}": data["exercise"]["total_minutes"],
+        "{{avg_exercise}}": data["exercise"]["average_per_day"],
+        "{{exercise_days}}": data["exercise"]["days_with_data"],
+        "{{total_calories}}": data["calories"]["total_burned"],
+        "{{avg_calories}}": data["calories"]["average_per_day"],
+        "{{calories_days}}": data["calories"]["days_with_data"],
+        "{{total_distance}}": data["distance"]["total_km"],
+        "{{avg_distance}}": data["distance"]["average_per_day"],
+        "{{distance_days}}": data["distance"]["days_with_data"]
+    }
+
+    # Calculate activity level based on average steps
+    avg_steps = data["steps"]["average_per_day"]
+    if avg_steps >= 12500:
+        activity_level = "Very Active"
+        step_intensity = "high"
+    elif avg_steps >= 7500:
+        activity_level = "Moderately Active"
+        step_intensity = "moderate"
+    else:
+        activity_level = "Lightly Active"
+        step_intensity = "light"
+
+    replacements["{{assessment}}"] = activity_level
+    replacements["{{step_intensity}}"] = step_intensity
+
+    # Replace placeholders with actual values
+    result = template_str
+    for placeholder, value in replacements.items():
+        result = result.replace(placeholder, str(value))
+
+    # Extract JSON block if present first
+    block_match = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", result)
+    if block_match:
+        result = block_match.group(1)
+    else:
+        # Fallback: attempt to find the first '{'...'}' span
+        first_brace = result.find('{')
+        last_brace = result.rfind('}')
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            result = result[first_brace:last_brace+1]
+
+    # Remove inline // comments which are invalid JSON
+    result = re.sub(r"//.*?$", "", result, flags=re.MULTILINE)
+
+    # Strip any lingering triple backticks or leading/trailing whitespace
+    result = result.strip().strip('`')
+
+    # Remove trailing commas before } or ]
+    result = re.sub(r',\s*(?=[}\]])', '', result)
+
+    # Attempt to parse JSON, with debug log on failure
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError as e:
+        logging.error("Sanitized JSON that failed to parse:\n%s", result)
+        raise
+
+def generate_vellum_physical_activity_report(fitness_summary):
+    """Generate physical activity report using Vellum API."""
+    
+    # Debug log the structure
+    app.logger.debug("Fitness Summary Structure:")
+    app.logger.debug(json.dumps(fitness_summary, indent=2))
+    
+    headers = {
+        "X-API-Key": VELLUM_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "prompt_deployment_name": "fitness-report-deployment",
+        "release_tag": "LATEST",
+        "response_format": {
+            "type": "json_object",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "activity_level": {"type": "string"},
+                    "summary": {
+                        "type": "object",
+                        "properties": {
+                            "total_steps": {"type": "number"},
+                            "total_exercise_minutes": {"type": "number"},
+                            "total_calories_burned": {"type": "number"},
+                            "total_distance_km": {"type": "number"},
+                            "average_steps_per_day": {"type": "number"},
+                            "average_exercise_minutes_per_day": {"type": "number"},
+                            "average_calories_per_day": {"type": "number"},
+                            "average_distance_per_day": {"type": "number"}
+                        }
+                    },
+                    "insights": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "recommendations": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "data_quality": {
+                        "type": "object",
+                        "properties": {
+                            "days_with_step_data": {"type": "number"},
+                            "days_with_exercise_data": {"type": "number"},
+                            "days_with_calorie_data": {"type": "number"},
+                            "days_with_distance_data": {"type": "number"}
+                        }
+                    }
+                }
+            }
+        },
+        "inputs": [
+            {"type": "STRING", "name": "date_range", "value": fitness_summary['date_range']},
+            {"type": "STRING", "name": "total_days", "value": str(fitness_summary['total_days'])},
+            {"type": "STRING", "name": "total_steps", "value": str(fitness_summary['steps']['total'])},
+            {"type": "STRING", "name": "avg_steps", "value": str(fitness_summary['steps']['average_per_day'])},
+            {"type": "STRING", "name": "steps_days", "value": str(fitness_summary['steps']['days_with_data'])},
+            {"type": "STRING", "name": "total_exercise", "value": str(fitness_summary['exercise']['total_minutes'])},
+            {"type": "STRING", "name": "avg_exercise", "value": str(fitness_summary['exercise']['average_per_day'])},
+            {"type": "STRING", "name": "exercise_days", "value": str(fitness_summary['exercise']['days_with_data'])},
+            {"type": "STRING", "name": "total_calories", "value": str(fitness_summary['calories']['total_burned'])},
+            {"type": "STRING", "name": "avg_calories", "value": str(fitness_summary['calories']['average_per_day'])},
+            {"type": "STRING", "name": "calories_days", "value": str(fitness_summary['calories']['days_with_data'])},
+            {"type": "STRING", "name": "total_distance", "value": str(fitness_summary['distance']['total_km'])},
+            {"type": "STRING", "name": "avg_distance", "value": str(fitness_summary['distance']['average_per_day'])},
+            {"type": "STRING", "name": "distance_days", "value": str(fitness_summary['distance']['days_with_data'])}
+        ]
+    }
+
+    try:
+        response = requests.post(
+            "https://api.vellum.ai/v1/execute-prompt", 
+            headers=headers, 
+            json=payload
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        if result.get("state") != "FULFILLED":
+            raise Exception(f"Vellum API error: {result.get('error', {}).get('message', 'Unknown error')}")
+            
+        # Get the first output
+        output = result["outputs"][0]
+        app.logger.debug("Vellum raw output: %s", json.dumps(output, indent=2, default=str))
+
+        # If Vellum already returned a JSON object, just return it
+        if isinstance(output.get("value"), dict):
+            return output["value"]
+        
+        # Otherwise treat it as a JSON template string
+        template_str = output["value"]
+        app.logger.debug("Template before replacements:\n%s", template_str)
+        
+        # Parse template and replace placeholders
+        try:
+            parsed = _parse_vellum_template(template_str, fitness_summary)
+            return parsed
+        except Exception as e:
+            app.logger.error("Failed to parse template: %s", str(e))
+            raise
+        
+    except Exception as e:
+        app.logger.error(f"Vellum API error for physical activity report: {str(e)}")
+        raise Exception(f"Failed to generate Vellum report: {str(e)}")
+
+
+def generate_vellum_sleep_report(fitness_summary):
+    """Generate sleep report using Vellum API."""
+    if not VELLUM_API_KEY:
+        raise Exception("Vellum API key not configured. Please set VELLUM_API_KEY environment variable.")
+    headers = {
+        "X-API-Key": VELLUM_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "prompt_deployment_name": "fitness-report-deployment",
+        "release_tag": "LATEST",
+        "response_format": {
+            "type": "json_object",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "sleep_quality": {"type": "string"},
+                    "sleep_assessment": {"type": "string"},
+                    "summary": {
+                        "type": "object",
+                        "properties": {
+                            "total_sleep_hours": {"type": "number"},
+                            "average_sleep_hours_per_night": {"type": "number"},
+                            "average_resting_heart_rate": {"type": "number"},
+                            "min_resting_heart_rate": {"type": "number"},
+                            "max_resting_heart_rate": {"type": "number"}
+                        }
+                    },
+                    "insights": {"type": "array", "items": {"type": "string"}},
+                    "recommendations": {"type": "array", "items": {"type": "string"}},
+                    "data_quality": {
+                        "type": "object",
+                        "properties": {
+                            "days_with_sleep_data": {"type": "number"},
+                            "days_with_heart_rate_data": {"type": "number"}
+                        }
+                    }
+                }
+            }
+        },
+        "inputs": [
+            {"type": "STRING", "name": "date_range", "value": fitness_summary['date_range']},
+            {"type": "STRING", "name": "total_days", "value": str(fitness_summary['total_days'])},
+            {"type": "STRING", "name": "total_sleep_hours", "value": str(fitness_summary['sleep']['total_hours'])},
+            {"type": "STRING", "name": "avg_sleep_hours", "value": str(fitness_summary['sleep']['average_per_night'])},
+            {"type": "STRING", "name": "sleep_days", "value": str(fitness_summary['sleep']['days_with_data'])},
+            {"type": "STRING", "name": "avg_resting_hr", "value": str(fitness_summary['heart_rate']['average_resting'])},
+            {"type": "STRING", "name": "min_resting_hr", "value": str(fitness_summary['heart_rate']['min_resting'])},
+            {"type": "STRING", "name": "max_resting_hr", "value": str(fitness_summary['heart_rate']['max_resting'])},
+            {"type": "STRING", "name": "hr_days", "value": str(fitness_summary['heart_rate']['days_with_data'])}
+        ]
+    }
+    try:
+        logging.info("Sending request to Vellum API: %s", json.dumps(payload, indent=2))
+        response = requests.post(
+            "https://api.vellum.ai/v1/execute-prompt",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        if response.status_code != 200:
+            raise Exception(f"Vellum API error: {response.status_code} - {response.text}")
+        
+        result = response.json()
+        logging.info("Received response from Vellum API: %s", json.dumps(result, indent=2))
+        
+        if result.get("state") == "REJECTED":
+            raise Exception(f"Vellum API rejected: {result.get('error', {}).get('message', 'Unknown error')}")
+        
+        # Extract and parse the output value (mirrors physical-activity logic)
+        if "outputs" not in result or len(result["outputs"]) == 0:
+            raise Exception("No outputs found in Vellum response")
+
+        output = result["outputs"][0]
+
+        # If Vellum already returned a parsed JSON object
+        if isinstance(output.get("value"), dict):
+            return output["value"]
+
+        template_str = output.get("value") or output.get("text", "")
+        if not template_str:
+            raise Exception("Vellum output was empty")
+
+        # Try direct JSON parse first
+        try:
+            return json.loads(template_str)
+        except json.JSONDecodeError:
+            # Fall back to placeholder substitution / cleanup
+            try:
+                parsed = _parse_vellum_template(template_str, fitness_summary)
+                return parsed
+            except Exception as e:
+                logging.error("Failed to parse template: %s", str(e))
+                raise
+        
+    except Exception as e:
+        logging.error("Vellum API error for sleep report: %s", str(e))
+        raise Exception(f"Failed to generate Vellum report: {str(e)}")
+
+
+
+
+
+
+
+
+def generate_physical_activity_report(window, physical_activity, health_summary):
+    """Generate a detailed physical activity report using Vellum-style analysis."""
+    
+    steps = physical_activity.get("steps", {})
+    exercise = physical_activity.get("exercise_minutes", {})
+    calories = physical_activity.get("calories", {})
+    distance = physical_activity.get("distance", {})
+    
+    steps_summary = steps.get("summary", {})
+    exercise_summary = exercise.get("summary", {})
+    calories_summary = calories.get("summary", {})
+    distance_summary = distance.get("summary", {})
+    
+    # Calculate activity levels and trends
+    avg_steps = steps_summary.get("average", 0)
+    avg_exercise = exercise_summary.get("average", 0)
+    avg_calories = calories_summary.get("average", 0)
+    
+    # Determine activity level
+    if avg_steps >= 10000 and avg_exercise >= 30:
+        activity_level = "Very Active"
+    elif avg_steps >= 7500 or avg_exercise >= 20:
+        activity_level = "Moderately Active"
+    elif avg_steps >= 5000:
+        activity_level = "Lightly Active"
+    else:
+        activity_level = "Sedentary"
+    
+    # Generate insights
+    insights = []
+    
+    if steps_summary.get("days_with_data", 0) > 0:
+        if avg_steps >= 10000:
+            insights.append("Excellent step count! You're consistently meeting the recommended daily goal.")
+        elif avg_steps >= 7500:
+            insights.append("Good step count. Consider increasing to 10,000 steps for optimal health benefits.")
+        else:
+            insights.append("Consider increasing your daily step count to improve cardiovascular health.")
+    
+    if exercise_summary.get("days_with_data", 0) > 0:
+        if avg_exercise >= 30:
+            insights.append("Great job with exercise! You're meeting the recommended 30 minutes of daily activity.")
+        elif avg_exercise >= 20:
+            insights.append("Good exercise routine. Try to reach 30 minutes daily for maximum benefits.")
+        else:
+            insights.append("Consider adding more exercise to your daily routine for better health outcomes.")
+    
+    if calories_summary.get("days_with_data", 0) > 0:
+        if avg_calories >= 2000:
+            insights.append("High calorie burn indicates an active lifestyle.")
+        elif avg_calories >= 1500:
+            insights.append("Moderate calorie burn suggests good activity levels.")
+        else:
+            insights.append("Consider increasing physical activity to boost calorie burn.")
+    
+    # Generate recommendations
+    recommendations = []
+    
+    if avg_steps < 10000:
+        recommendations.append("Aim for 10,000 steps daily by taking short walks throughout the day.")
+    
+    if avg_exercise < 30:
+        recommendations.append("Incorporate 30 minutes of moderate exercise into your daily routine.")
+    
+    if distance_summary.get("average", 0) < 5:  # less than 5km daily
+        recommendations.append("Try to increase your daily distance through walking, running, or cycling.")
+    
+    if not recommendations:
+        recommendations.append("Maintain your excellent activity levels and consider adding variety to your exercise routine.")
+    
+    return {
+        "title": f"Physical Activity Report: {window.get('start', '')} to {window.get('end', '')}",
+        "activity_level": activity_level,
+        "summary": {
+            "total_steps": health_summary.get("total_steps", 0),
+            "total_exercise_minutes": health_summary.get("total_exercise_minutes", 0),
+            "total_calories_burned": health_summary.get("total_calories", 0),
+            "total_distance_km": health_summary.get("total_distance_km", 0),
+            "average_steps_per_day": steps_summary.get("average", 0),
+            "average_exercise_minutes_per_day": exercise_summary.get("average", 0),
+            "average_calories_per_day": calories_summary.get("average", 0),
+            "average_distance_per_day": distance_summary.get("average", 0)
+        },
+        "insights": insights,
+        "recommendations": recommendations,
+        "data_quality": {
+            "days_with_step_data": steps_summary.get("days_with_data", 0),
+            "days_with_exercise_data": exercise_summary.get("days_with_data", 0),
+            "days_with_calorie_data": calories_summary.get("days_with_data", 0),
+            "days_with_distance_data": distance_summary.get("days_with_data", 0)
+        }
+    }
+
+
+def generate_sleep_report(window, sleep, health_summary):
+    """Generate a detailed sleep report using Vellum-style analysis."""
+    
+    sleep_duration = sleep.get("duration", {})
+    heart_rate = sleep.get("heart_rate", {})
+    
+    duration_summary = sleep_duration.get("summary", {})
+    hr_summary = heart_rate.get("summary", {})
+    
+    # Calculate sleep metrics
+    avg_sleep_hours = health_summary.get("average_sleep_hours", 0)
+    total_sleep_hours = health_summary.get("total_sleep_hours", 0)
+    
+    # Determine sleep quality
+    if avg_sleep_hours >= 7 and avg_sleep_hours <= 9:
+        sleep_quality = "Excellent"
+        sleep_assessment = "You're getting the recommended amount of sleep for optimal health."
+    elif avg_sleep_hours >= 6 and avg_sleep_hours < 7:
+        sleep_quality = "Good"
+        sleep_assessment = "Your sleep duration is close to optimal. Consider adding 30-60 minutes for better recovery."
+    elif avg_sleep_hours >= 5 and avg_sleep_hours < 6:
+        sleep_quality = "Fair"
+        sleep_assessment = "You're getting less sleep than recommended. This may impact your health and performance."
+    else:
+        sleep_quality = "Poor"
+        sleep_assessment = "Your sleep duration is significantly below recommended levels. Consider prioritizing sleep hygiene."
+    
+    # Generate sleep insights
+    insights = []
+    
+    if avg_sleep_hours >= 8:
+        insights.append("Excellent sleep duration! You're getting the recommended 7-9 hours of sleep.")
+    elif avg_sleep_hours >= 7:
+        insights.append("Good sleep duration. You're close to the optimal range for most adults.")
+    elif avg_sleep_hours >= 6:
+        insights.append("Moderate sleep duration. Consider extending your sleep time for better recovery.")
+    else:
+        insights.append("Your sleep duration is below recommended levels. This may affect your health and daily performance.")
+    
+    # Heart rate insights during sleep
+    if hr_summary.get("days_with_data", 0) > 0:
+        avg_hr = hr_summary.get("average_hr", 0)
+        if avg_hr > 0:
+            if avg_hr < 60:
+                insights.append("Your resting heart rate is excellent, indicating good cardiovascular fitness.")
+            elif avg_hr < 70:
+                insights.append("Your resting heart rate is good, suggesting healthy cardiovascular function.")
+            else:
+                insights.append("Consider discussing your resting heart rate with a healthcare provider.")
+    
+    # Generate sleep recommendations
+    recommendations = []
+    
+    if avg_sleep_hours < 7:
+        recommendations.append("Aim for 7-9 hours of sleep per night for optimal health and recovery.")
+        recommendations.append("Establish a consistent sleep schedule and bedtime routine.")
+        recommendations.append("Create a sleep-friendly environment: dark, quiet, and cool.")
+    
+    if avg_sleep_hours > 9:
+        recommendations.append("While you're getting plenty of sleep, excessive sleep may indicate underlying health issues.")
+    
+    if duration_summary.get("days_with_data", 0) < 3:
+        recommendations.append("Consider tracking your sleep more consistently to get better insights.")
+    
+    if not recommendations:
+        recommendations.append("Maintain your excellent sleep habits and continue prioritizing rest and recovery.")
+    
+    return {
+        "title": f"Sleep Report: {window.get('start', '')} to {window.get('end', '')}",
+        "sleep_quality": sleep_quality,
+        "sleep_assessment": sleep_assessment,
+        "summary": {
+            "total_sleep_hours": total_sleep_hours,
+            "average_sleep_hours_per_night": avg_sleep_hours,
+            "average_resting_heart_rate": hr_summary.get("average_hr", 0),
+            "min_resting_heart_rate": hr_summary.get("min_hr", 0),
+            "max_resting_heart_rate": hr_summary.get("max_hr", 0)
+        },
+        "insights": insights,
+        "recommendations": recommendations,
+        "data_quality": {
+            "days_with_sleep_data": duration_summary.get("days_with_data", 0),
+            "days_with_heart_rate_data": hr_summary.get("days_with_data", 0)
+        }
+    }
 
 
 @app.route("/api/rings")
@@ -909,6 +1800,28 @@ document.getElementById("go").onclick = async () => {
 def report_test():
     """Very small HTML page that lets you hit /api/report from the browser."""
     return TEST_PAGE_HTML
+
+
+def _convert_numeric(value):
+    """Try to convert string numbers to int or float."""
+    if isinstance(value, str):
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _normalize_report(report: dict):
+    """Recursively walk report and convert numeric strings to numbers for frontend compatibility."""
+    if isinstance(report, dict):
+        return {k: _normalize_report(v) for k, v in report.items()}
+    if isinstance(report, list):
+        return [_normalize_report(v) for v in report]
+    return _convert_numeric(report)
+
 
 
 
