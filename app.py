@@ -39,6 +39,11 @@ import requests
 from google.oauth2.credentials import Credentials
 import logging
 logging.basicConfig(level=logging.DEBUG, format="DBG %(message)s")
+from pathlib import Path
+from flask_cors import CORS
+
+
+
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -66,6 +71,12 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")  # dev-only
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
+CORS(
+    app,
+    origins=["http://127.0.0.1:5001"],
+    supports_credentials=True   # because you send the session cookie
+)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -138,6 +149,23 @@ def _fill_gaps(daily: list[dict], start: dt.date, end: dt.date):
         filled.append({"date": iso, "value": existing.get(iso, 0)})
         cur += dt.timedelta(days=1)
     return filled
+
+def _write_bar_png(daily, y_label: str, title: str, out_path: str):
+    """Builds a bar chart and writes it straight to `out_path`."""
+    dates = [d["date"] for d in daily]
+    values = [d["value"] for d in daily]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(dates) * 0.4), 4))
+    ax.bar(dates, values)
+    ax.set_xlabel("Date")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    fig.autofmt_xdate(rotation=45, ha="right")
+
+    # ensure parent dir exists
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -300,16 +328,24 @@ def report():
     sleep_daily = _fill_gaps(sleep_daily, start_date, end_date)
     steps_png = _plot_bars(steps_daily, "Steps", "Daily Step Count")
     sleep_png = _plot_bars(sleep_daily, "Minutes asleep", "Nightly Sleep Duration")
+    steps_fname = f"steps_{start_str}_{end_str}.png"
+    sleep_fname = f"sleep_{start_str}_{end_str}.png"
+    steps_path = os.path.join(app.static_folder, steps_fname)
+    sleep_path = os.path.join(app.static_folder, sleep_fname)
+    _write_bar_png(steps_daily, "Steps", "Daily Step Count", steps_path)
+    _write_bar_png(sleep_daily, "Minutes asleep", "Nightly Sleep Duration", sleep_path)
+    NEXT_PUBLIC_DIR = Path(__file__).resolve().parent / "public" / "reports"
+    NEXT_PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
 
+    # copy (or symlink) into Next/public/reports
+    import shutil
+    shutil.copy2(steps_path, NEXT_PUBLIC_DIR / steps_fname)
+    shutil.copy2(sleep_path, NEXT_PUBLIC_DIR / sleep_fname)
     # 4️⃣  LLM-friendly JSON payload
     payload = {
         "window": {"start": start_str, "end": end_str},
         "physical_activity_data": steps_daily,
         "sleep_data": sleep_daily,
-        "graphs": {
-            "steps_png_base64": steps_png,
-            "sleep_png_base64": sleep_png,
-        },
     }
     return jsonify(payload)
 
