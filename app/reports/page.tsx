@@ -45,7 +45,7 @@ const DateField: FC<DateFieldProps> = ({ label, date, onChange }) => {
       </span>
       <Popover>
         <PopoverTrigger asChild>
-          <button className="w-48 h-12 bg-[#F099C1] hover:bg-[#EA83B3] rounded-2xl text-lg font-semibold text-white px-6 flex items-center justify-between">
+          <button className="w-64 h-12 bg-[#F099C1] hover:bg-[#EA83B3] rounded-2xl text-lg font-semibold text-white px-6 flex items-center justify-between">
             {date ? format(date, "PPP") : <span>Select date</span>}
             <CalendarIcon className="ml-2 h-5 w-5" />
           </button>

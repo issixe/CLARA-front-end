@@ -1,14 +1,15 @@
 "use client";
 
+import type { FC } from "react";
 import { useState } from "react";
 import Link from "next/link";
+import { format } from "date-fns";
+import { Calendar } from "@/components/ui/calendar";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from "@/components/ui/popover";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,7 +17,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChevronDown, User, Settings, LogOut } from "lucide-react";
+import {
+  ChevronDown,
+  User,
+  Settings,
+  LogOut,
+  CalendarIcon,
+} from "lucide-react";
 
 const symptomData = {
   "2025-07-20": [
@@ -50,8 +57,37 @@ const symptomData = {
   ],
 };
 
+// DateField component for calendar picker
+interface DateFieldProps {
+  date?: Date;
+  onChange: (d: Date | undefined) => void;
+}
+
+const DateField: FC<DateFieldProps> = ({ date, onChange }) => {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button className="w-64 h-12 bg-[#F099C1] hover:bg-[#EA83B3] border-none rounded-2xl text-lg font-semibold text-white px-6 transition-colors flex items-center justify-between">
+          {date ? format(date, "PPP") : <span>Select date</span>}
+          <CalendarIcon className="ml-2 h-5 w-5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="p-0" align="start">
+        <Calendar
+          mode="single"
+          selected={date}
+          onSelect={onChange}
+          initialFocus
+        />
+      </PopoverContent>
+    </Popover>
+  );
+};
+
 export default function HomePage() {
-  const [selectedDate, setSelectedDate] = useState("2025-07-20");
+  const [selectedDate, setSelectedDate] = useState<Date>(
+    new Date("2025-07-20")
+  );
 
   return (
     <div className="min-h-screen p-6 bg-[#fff3e2]">
@@ -134,19 +170,19 @@ export default function HomePage() {
 
       {/* Main Content with top padding for nav */}
       <div className="pt-24">
+        {/* Title */}
+        <h2 className="text-2xl font-bold text-gray-600 mb-4">
+          Generate Logs:
+        </h2>
+
         {/* Date Selector */}
         <div className="flex justify-start mb-8">
-          <Select value={selectedDate} onValueChange={setSelectedDate}>
-            <SelectTrigger className="w-64 h-16 bg-[#F099C1] hover:bg-[#EA83B3] border-none rounded-2xl text-2xl font-semibold text-white py-3 px-8 transition-colors flex items-center justify-between">
-              <SelectValue />
-              <div className="w-px h-8 bg-white/50 mx-3"></div>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="2025-07-20">2025-07-20 </SelectItem>
-              <SelectItem value="2025-07-19">2025-07-19</SelectItem>
-              <SelectItem value="2025-07-18">2025-07-18</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="flex items-center">
+            <span className="text-lg font-semibold text-gray-700 mr-4">
+              Choose date:
+            </span>
+            <DateField date={selectedDate} onChange={setSelectedDate} />
+          </div>
         </div>
 
         {/* Main Content */}
@@ -178,7 +214,10 @@ export default function HomePage() {
                     </thead>
                     <tbody>
                       {symptomData[
-                        selectedDate as keyof typeof symptomData
+                        format(
+                          selectedDate,
+                          "yyyy-MM-dd"
+                        ) as keyof typeof symptomData
                       ]?.map((entry, index) => (
                         <tr
                           key={index}
